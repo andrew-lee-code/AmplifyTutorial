@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "api": {
+      "amplifiedtodo": [
+        "Query",
+        "Mutation"
+      ]
+    },
+    "auth": {
+      "amplifiedtodo": [
+        "create",
+        "read",
+        "update",
+        "delete"
+      ]
+    },
+    "storage": {
+      "Todo:@model(appsync)": [
+        "create",
+        "read",
+        "update",
+        "delete"
+      ]
+    }
+  },
+  "lambdaLayers": [],
+  "environmentVariableList": [
+    {
+      "cloudFormationParameterName": "testEnvVar",
+      "environmentVariableName": "TEST_ENV_VAR"
+    }
+  ]
+}

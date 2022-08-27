@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "api": {
+      "amplifiedtodo": [
+        "Query"
+      ]
+    },
+    "auth": {
+      "amplifiedtodo": [
+        "read"
+      ]
+    },
+    "storage": {
+      "User:@model(appsync)": [
+        "read"
+      ]
+    }
+  },
+  "lambdaLayers": []
+}

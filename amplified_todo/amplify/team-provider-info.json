@@ -1,0 +1,32 @@
+{
+  "staging": {
+    "awscloudformation": {
+      "AuthRoleName": "amplify-amplifiedtodo-staging-134951-authRole",
+      "UnauthRoleArn": "arn:aws:iam::884358004219:role/amplify-amplifiedtodo-staging-134951-unauthRole",
+      "AuthRoleArn": "arn:aws:iam::884358004219:role/amplify-amplifiedtodo-staging-134951-authRole",
+      "Region": "us-east-2",
+      "DeploymentBucketName": "amplify-amplifiedtodo-staging-134951-deployment",
+      "UnauthRoleName": "amplify-amplifiedtodo-staging-134951-unauthRole",
+      "StackName": "amplify-amplifiedtodo-staging-134951",
+      "StackId": "arn:aws:cloudformation:us-east-2:884358004219:stack/amplify-amplifiedtodo-staging-134951/5e5063b0-e98d-11ec-aab0-02b793202106",
+      "AmplifyAppId": "dj5icyg04x2ej",
+      "APIGatewayAuthURL": "https://s3.amazonaws.com/amplify-amplifiedtodo-staging-134951-deployment/amplify-cfn-templates/api/APIGatewayAuthStack.json"
+    },
+    "categories": {
+      "auth": {
+        "amplifiedtodo": {}
+      },
+      "function": {
+        "todoLambda": {
+          "testEnvVar": "hello world",
+          "deploymentBucketName": "amplify-amplifiedtodo-staging-134951-deployment",
+          "s3Key": "amplify-builds/todoLambda-366f2f61766b64503377-build.zip"
+        },
+        "userLambda": {
+          "deploymentBucketName": "amplify-amplifiedtodo-staging-134951-deployment",
+          "s3Key": "amplify-builds/userLambda-51755373374231706451-build.zip"
+        }
+      }
+    }
+  }
+}
