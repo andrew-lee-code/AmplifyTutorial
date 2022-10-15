@@ -40,14 +40,6 @@
             "Name",
             "Arn"
           ]
-        },
-        {
-          "category": "function",
-          "resourceName": "callAPIfromLambda",
-          "attributes": [
-            "Name",
-            "Arn"
-          ]
         }
       ]
     },
@@ -176,29 +168,6 @@
           "resourceName": "amplifiedtodoTodoAPILayer",
           "attributes": [
             "Arn"
-          ]
-        }
-      ]
-    },
-    "callAPIfromLambda": {
-      "build": true,
-      "providerPlugin": "awscloudformation",
-      "service": "Lambda",
-      "dependsOn": [
-        {
-          "category": "api",
-          "resourceName": "amplifiedtodo",
-          "attributes": [
-            "GraphQLAPIIdOutput",
-            "GraphQLAPIEndpointOutput",
-            "GraphQLAPIKeyOutput"
-          ]
-        },
-        {
-          "category": "auth",
-          "resourceName": "amplifiedtodo",
-          "attributes": [
-            "UserPoolId"
           ]
         }
       ]

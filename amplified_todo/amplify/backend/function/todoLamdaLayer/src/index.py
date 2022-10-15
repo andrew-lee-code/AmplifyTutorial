@@ -15,9 +15,6 @@ def handler(event, context):
 
   if http_verb == "POST":
     print("Received and recognized POST request")
-    ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-    print("ROOOT DIR")
-    print(ROOT_DIR)
 
     requestBody = json.loads(event["body"])
     print("Working directory:")
