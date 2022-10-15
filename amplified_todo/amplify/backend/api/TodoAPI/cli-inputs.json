@@ -23,6 +23,19 @@
           "read"
         ]
       }
+    },
+    "/callAPIfromLambda": {
+      "name": "/callAPIfromLambda",
+      "lambdaFunction": "callAPIfromLambda",
+      "permissions": {
+        "setting": "private",
+        "auth": [
+          "create",
+          "read",
+          "update",
+          "delete"
+        ]
+      }
     }
   }
 }

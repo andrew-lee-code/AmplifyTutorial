@@ -1,0 +1,305 @@
+from datetime import datetime
+import json
+import os
+import logging
+import time
+import uuid
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
+
+BIN_TABLE = os.environ.get("API_DEMIAPP_BINTABLE_NAME")
+BIN_TYPE_TABLE = os.environ.get("API_DEMIAPP_BINTYPETABLE_NAME")
+USER_TABLE = os.environ.get("API_DEMIAPP_USERTABLE_NAME")
+REQUEST_HTTP_METHOD_FIELD = "httpMethod"
+REQUEST_BODY_FIELD = "body"
+
+# POST Body Params
+POST_BODY_USER_ID = "userId"
+POST_BODY_LABEL_DATA = "labelData"
+
+# PUT Body Params
+PUT_BODY_USER_ID = "userId"
+PUT_BODY_BIN_LABEL = "labelData"
+PUT_BODY_BIN_STATUS = "binStatus"
+PUT_BODY_WEIGHT = "weight"
+PUT_BODY_STATUS_HISTORY = "statusHistory"
+
+# TABLE COLUMNS
+COL_ID = "id"
+COL_LABEL_ID = "labelId"
+COL_WEIGHT_LB = "weightLb"
+COL_BIN_TYPE_ID = "binTypeId"
+COL_BIN_STATUS = "status"
+COL_STATUS_HISTORY = "statusHistory"
+COL_USER_ID = "userID"
+COL_TYPE_NAME = "__typename"
+COL_LAST_CHANGED_AT = "_lastChangedAt"
+COL_VERSION = "_version"
+COL_UPDATED_AT = "updatedAt"
+COL_CREATED_AT = "createdAt"
+
+USER_COL_PERMISSION_LEVEL = "permissionLevel"
+USER_PERMISSION_LEVEL_ADMIN = "ADMIN"
+
+# STATUS HISTORY FIELDS
+STATUS_HISTORY_ENUM = {
+    "claimed": "claimed",
+    "awaiting_pickup": "awaiting_pickup",
+    "picked_up": "picked_up",
+    "weighed": "weighed",
+    "composted": "composted"
+}
+
+# BIN STATUS ENUM
+# TODO: Is there a better way to make an enum?
+BIN_STATUS_ENUM = {
+    "UNCLAIMED": "UNCLAIMED",
+    "CLAIMED": "CLAIMED",
+    "AWAITING_PICKUP": "AWAITING_PICKUP",
+    "PICKED_UP": "PICKED_UP",
+    "WEIGHED" : "WEIGHED",
+    "COMPOSTED" : "COMPOSTED"
+}
+
+# ERROR MESSAGES
+ERR_MSG_BIN_BELONGS_TO_CURRENT_USER = "This bin belongs to you already, no need to scan again!"
+ERR_MSG_BIN_BELONGS_TO_ANOTHER_USER = "This bin already belongs to another user. If you think this is a mistake please contact our Support team."
+ERR_MSG_NO_BIN_FOUND = "No bin was found in the database with this label Id"
+ERR_MSG_USER_NOT_ALLOWED = "Insufficient permissions to update bin data"
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+dynamodb = boto3.resource('dynamodb')
+bin_table = dynamodb.Table(BIN_TABLE)
+bin_type_table = dynamodb.Table(BIN_TYPE_TABLE)
+user_table = dynamodb.Table(USER_TABLE)
+
+
+def handler(event, context):
+    logger.info(f'## ENVIRONMENT VARIABLES:\n{os.environ}')
+    logger.info(f'## EVENT:\n{event}')
+
+    http_verb = event[REQUEST_HTTP_METHOD_FIELD]
+
+    if http_verb == "POST": 
+        try:
+            request_body = json.loads(event[REQUEST_BODY_FIELD])
+            if validate_post_body(request_body):
+                logger.info(f"PARAMS PASSED:\n{request_body}")
+                label_data = request_body[POST_BODY_LABEL_DATA]
+                user_id = request_body[POST_BODY_USER_ID]
+
+                check_bin_ownership(label_data, user_id)
+
+                bin_type_id = decode_bin_type_from_label_data(label_data)
+
+                db_response = associate_bin_to_user(label_data, user_id, bin_type_id)
+
+                return make_return_obj(200, "Success")
+
+            else:
+                logger.error(f"Bad QS params")
+                return make_return_obj(400, "Error claiming bin")
+
+        except Exception as e:
+            logger.exception(repr(e))
+            if ERR_MSG_BIN_BELONGS_TO_CURRENT_USER in repr(e):
+                return make_return_obj(500, str(e))
+            if ERR_MSG_BIN_BELONGS_TO_ANOTHER_USER in repr(e):
+                return make_return_obj(500, str(e))
+            else:
+                return make_return_obj(500, "Error claiming bin")
+
+    elif http_verb == "PUT":
+        try:
+            request_body = json.loads(event[REQUEST_BODY_FIELD])
+
+            if validate_put_body(request_body):
+
+                check_user_permissions(request_body[PUT_BODY_USER_ID])
+
+                db_response = update_bin_data(request_body)
+                
+                return make_return_obj(200, "Success")
+
+            else:
+                logger.exception("Invalid POST data")
+                return make_return_obj(400, "Error adding bin data")
+
+        except Exception as e:
+            logger.exception(repr(e))
+            if ERR_MSG_NO_BIN_FOUND in repr(e):
+                return make_return_obj(500, str(e))
+            if ERR_MSG_USER_NOT_ALLOWED in repr(e):
+                return make_return_obj(500, str(e))
+            else:
+                return make_return_obj(500, "Error adding bin data")
+
+    else:
+        logger.exception("Invalid HTTP request")
+        return make_return_obj(400, "Error adding bin data")
+
+
+def make_return_obj(statusCode, body):
+  return {
+    'statusCode': statusCode,
+    'headers': {
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+    },
+    'body': body
+  }
+
+def validate_post_body(post_body: dict):
+    is_valid = True
+    try:
+        if len(post_body.keys()) != 2:
+            is_valid=False
+        if not (isinstance(post_body[POST_BODY_LABEL_DATA], str) 
+                and (len(post_body[POST_BODY_LABEL_DATA]) < 50)
+                and post_body[POST_BODY_LABEL_DATA]):
+            is_valid=False
+        if not (isinstance(post_body[POST_BODY_USER_ID], str) 
+                and (len(post_body[POST_BODY_USER_ID]) < 50)
+                and post_body[POST_BODY_USER_ID]):
+            is_valid=False
+
+    except Exception as e:
+        logger.exception(repr(e))
+
+    return is_valid
+
+def validate_put_body(put_body: dict):
+    is_valid = True
+    try:
+        if len(put_body.keys()) > 4 or len(put_body.keys()) < 1:
+            is_valid=False
+        if not (isinstance(put_body[PUT_BODY_BIN_LABEL], str) 
+                and (len(put_body[PUT_BODY_BIN_LABEL]) < 50)
+                and put_body[PUT_BODY_BIN_LABEL]):
+            is_valid=False
+        if not (isinstance(put_body[PUT_BODY_WEIGHT], float) 
+                and put_body[PUT_BODY_WEIGHT]):
+            is_valid=False
+        if not (isinstance(put_body[PUT_BODY_BIN_STATUS], str) 
+                and put_body[PUT_BODY_BIN_STATUS] in BIN_STATUS_ENUM.keys()):
+            is_valid=False
+        #TODO:
+        # if not (isinstance(put_body[PUT_BODY_STATUS_HISTORY], dict) 
+        #         and put_body[PUT_BODY_STATUS_HISTORY].keys() are a subset of VALID_STATUS_HISTORY_FIELDS):
+        #     is_valid=False
+        #TODO: values of STATUS_HISTORY must be unix timestamps
+
+    except Exception as e:
+        logger.exception(repr(e))
+
+    return is_valid
+
+def check_bin_ownership(label_data: str, user_id:str):
+
+    response = bin_table.scan(
+        FilterExpression=Attr(COL_LABEL_ID).eq(label_data)
+    )
+    
+    # Raise exceptions accordingly if bin is already claimed, otherwise no need to do anything
+    if len(response["Items"]) > 1:
+        raise Exception(f"Multiple results returned when looking up bin with label {label_data}")
+    if len(response["Items"]) == 1:
+        if response["Items"][0][COL_USER_ID] == user_id:
+            raise Exception(ERR_MSG_BIN_BELONGS_TO_CURRENT_USER)
+        else:
+            raise Exception(ERR_MSG_BIN_BELONGS_TO_ANOTHER_USER)
+    
+def decode_bin_type_from_label_data(bin_label: str):
+    #TODO: hardcode returning of bin type for now but come up with some system to embed this in label data
+    return "123"
+
+def associate_bin_to_user(label_data: str, user_id: str, bin_type_id: str):
+    current_timestamp = int(time.time())
+
+    status_history = {
+        STATUS_HISTORY_ENUM["claimed"] : current_timestamp,
+        STATUS_HISTORY_ENUM["awaiting_pickup"]: None,
+        STATUS_HISTORY_ENUM["picked_up"]: None,
+        STATUS_HISTORY_ENUM["weighed"]: None,
+        STATUS_HISTORY_ENUM["composted"]: None
+    }
+
+    response = bin_table.put_item(
+                Item={
+                    "__typename": "Bin",
+                    "_lastChangedAt": current_timestamp,
+                    "_version" : 1,
+                    COL_ID: str(uuid.uuid4()),
+                    COL_LABEL_ID: label_data,
+                    COL_WEIGHT_LB: None, #TODO:is this ok to be null???
+                    COL_BIN_TYPE_ID: bin_type_id,
+                    COL_BIN_STATUS: BIN_STATUS_ENUM["CLAIMED"],
+                    COL_STATUS_HISTORY: status_history,
+                    COL_USER_ID: user_id,
+                    COL_CREATED_AT: datetime.utcfromtimestamp(current_timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+                    COL_UPDATED_AT: datetime.utcfromtimestamp(current_timestamp).strftime('%Y-%m-%d %H:%M:%S'),
+                }
+            )
+    
+    return response
+
+def check_user_permissions(user_id: str):
+
+    user_response = user_table.scan(
+            FilterExpression=Attr(COL_ID).eq(user_id)
+        )
+    try:
+        if not user_response["Items"][0][USER_COL_PERMISSION_LEVEL] == USER_PERMISSION_LEVEL_ADMIN:
+            raise Exception(ERR_MSG_USER_NOT_ALLOWED)
+    except:
+        raise Exception("Could not identify user when validating admin status")
+
+def update_bin_data(put_body):
+
+    response = bin_table.scan(
+        FilterExpression=Attr(COL_LABEL_ID).eq(put_body[PUT_BODY_BIN_LABEL])
+    )
+
+    # Ensure that exactly one bin exists with this label
+    if len(response["Items"]) > 1:
+        raise Exception(f"Multiple results returned when looking up bin with label {put_body[PUT_BODY_BIN_LABEL]}")
+    if len(response["Items"]) == 0:
+        raise Exception(ERR_MSG_NO_BIN_FOUND)
+    
+    bin_to_update_id = response["Items"][0][COL_ID]
+
+    # Build UpdateExpression
+    update_expression = ["set "]
+    if put_body[PUT_BODY_BIN_STATUS]:
+        update_expression.append(f" {COL_BIN_STATUS} = :{COL_BIN_STATUS},")
+    if put_body[PUT_BODY_STATUS_HISTORY]:
+        update_expression.append(f" {COL_STATUS_HISTORY} = :{COL_STATUS_HISTORY},")
+    if put_body[PUT_BODY_WEIGHT]:
+        update_expression.append(f" {COL_WEIGHT_LB} = :{COL_WEIGHT_LB},")
+    update_expression.append(f" {COL_UPDATED_AT} = :{COL_UPDATED_AT},")
+    update_expression.append(f" {COL_LAST_CHANGED_AT} = :{COL_LAST_CHANGED_AT}")
+    update_expression = "".join(update_expression)
+
+    # Build ExpressionAttributeValues
+    current_timestamp = int(time.time())
+    expression_values = dict()
+    if put_body[PUT_BODY_BIN_STATUS]:
+        expression_values.update({f":{COL_BIN_STATUS}" : put_body[PUT_BODY_BIN_STATUS]})
+    if put_body[PUT_BODY_STATUS_HISTORY]:
+        expression_values.update({f":{COL_STATUS_HISTORY}" : put_body[PUT_BODY_STATUS_HISTORY]})
+    if put_body[PUT_BODY_WEIGHT]:
+        expression_values.update({f":{COL_WEIGHT_LB}" : put_body[PUT_BODY_WEIGHT]})
+    expression_values.update({f":{COL_UPDATED_AT}" : datetime.utcfromtimestamp(current_timestamp).strftime('%Y-%m-%d %H:%M:%S')})
+    expression_values.update({f":{COL_LAST_CHANGED_AT}" : current_timestamp})
+
+    bin_table.update_item(
+        Key={
+            'id': bin_to_update_id
+        },
+        UpdateExpression=update_expression,
+        ExpressionAttributeValues=expression_values
+    )
+
+    

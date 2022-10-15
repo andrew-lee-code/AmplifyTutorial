@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "paths": {
+    "/layer/todo": {
+      "name": "/layer/todo",
+      "lambdaFunction": "todoLamdaLayer",
+      "permissions": {
+        "setting": "private",
+        "auth": [
+          "create",
+          "read",
+          "update",
+          "delete"
+        ]
+      }
+    }
+  }
+}

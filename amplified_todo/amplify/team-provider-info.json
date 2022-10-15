@@ -25,6 +25,14 @@
         "userLambda": {
           "deploymentBucketName": "amplify-amplifiedtodo-staging-134951-deployment",
           "s3Key": "amplify-builds/userLambda-51755373374231706451-build.zip"
+        },
+        "amplifiedtodoTodoAPILayer": {
+          "deploymentBucketName": "amplify-amplifiedtodo-staging-134951-deployment",
+          "s3Key": "amplify-builds/amplifiedtodoTodoAPILayer-LambdaLayerVersione4b73cc1-build.zip"
+        },
+        "todoLamdaLayer": {
+          "deploymentBucketName": "amplify-amplifiedtodo-staging-134951-deployment",
+          "s3Key": "amplify-builds/todoLamdaLayer-69446c734f35386c4877-build.zip"
         }
       }
     }

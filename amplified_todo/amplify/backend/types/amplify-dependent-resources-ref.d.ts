@@ -9,6 +9,11 @@ export type AmplifyDependentResourcesAttributes = {
             "RootUrl": "string",
             "ApiName": "string",
             "ApiId": "string"
+        },
+        "todoLayerAPI": {
+            "RootUrl": "string",
+            "ApiName": "string",
+            "ApiId": "string"
         }
     },
     "auth": {
@@ -30,6 +35,15 @@ export type AmplifyDependentResourcesAttributes = {
             "LambdaExecutionRole": "string"
         },
         "userLambda": {
+            "Name": "string",
+            "Arn": "string",
+            "Region": "string",
+            "LambdaExecutionRole": "string"
+        },
+        "amplifiedtodoTodoAPILayer": {
+            "Arn": "string"
+        },
+        "todoLamdaLayer": {
             "Name": "string",
             "Arn": "string",
             "Region": "string",

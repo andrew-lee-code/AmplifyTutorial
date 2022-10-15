@@ -16,8 +16,8 @@ const App = () => {
     const getData = async () => {
       try {
         setIsLoading(true);
-        const apiName = "TodoAPI";
-        const path = "/todo";
+        const apiName = "todoLayerAPI";
+        const path = "/layer/todo";
         const myInit = {
           body: {
             test: "This description has been changed from the POST request",

@@ -1,0 +1,200 @@
+from datetime import datetime
+import json
+import os
+import logging
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
+
+#GET /User/DisplayData/Friends?userId={someUserId}
+#Start with UserId
+#Find Existing Friendships (senderUserId = UserId or receiverUserId = UserId AND confirmed = true)
+#Find Pending Sent Friendships (senderUserId = UserId AND confirmed = false)
+
+#Find valid Users (IS IN existing friendships or IS IN pending sent friendships)
+#Add profilePictureUrl and friendshipId
+
+USER_TABLE = os.environ.get("API_DEMIAPP_USERTABLE_NAME")
+FRIENDSHIP_TABLE = os.environ.get("API_DEMIAPP_FRIENDSHIPTABLE_NAME")
+S3_BUCKET_NAME = os.environ.get("STORAGE_S3DEMIUSERPROFILEPICTURES_BUCKETNAME")
+REQUEST_HTTP_METHOD_FIELD = "httpMethod"
+REQUEST_QS_PARAMS_FIELD = "queryStringParameters"
+
+QS_USER_ID = "userId"
+
+# TABLE COLUMNS
+FRIENDSHIP_COL_ID = "id"
+FRIENDSHIP_COL_SENT_ID = "senderUserId"
+FRIENDSHIP_COL_RECEIVED_ID = "receiverUserId"
+FRIENDSHIP_COL_CONFIRMED = "confirmed"
+
+USER_COL_ID = "id"
+USER_COL_FIRSTNAME = "firstName"
+USER_COL_LASTNAME = "lastName"
+USER_COL_USERNAME = "username"
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+dynamodb = boto3.resource('dynamodb')
+s3 = boto3.client('s3')
+user_table = dynamodb.Table(USER_TABLE)
+friendship_table = dynamodb.Table(FRIENDSHIP_TABLE)
+
+def handler(event, context):
+    logger.info(f'## ENVIRONMENT VARIABLES:\n{os.environ}')
+    logger.info(f'## EVENT:\n{event}')
+
+    http_verb = event[REQUEST_HTTP_METHOD_FIELD]
+
+    if http_verb == "GET": 
+        try:
+            qs_param_dict = event[REQUEST_QS_PARAMS_FIELD]
+            if validate_qs_params(qs_param_dict):
+                user_id = qs_param_dict[QS_USER_ID]
+                
+                confirmed_friendships = find_confirmed_friendships(user_id)
+                unconfirmed_sent_friendships = find_unconfirmed_sent_friendships(user_id)
+
+                users_ids_to_display = get_user_ids_to_display(confirmed_friendships, unconfirmed_sent_friendships)
+
+                users_to_display = find_users_to_display(users_ids_to_display)
+                
+                transformed_user_data = transform_friend_user_data(users_to_display, unconfirmed_sent_friendships)
+
+                return make_return_obj(200, json.dumps([u.toJSON() for u in transformed_user_data], default=str))
+            
+            else:
+                logger.error(f"Bad QS params")
+                return make_return_obj(400, "Error retrieving friends")
+
+        except Exception as e:
+            logger.exception(repr(e))
+            return make_return_obj(500, "Error retrieving friends")
+
+    else:
+        logger.error(f"Invalid HTTP request")
+        return make_return_obj(400, "Error retrieving friends")
+
+
+def make_return_obj(statusCode, body):
+  return {
+    'statusCode': statusCode,
+    'headers': {
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+    },
+    'body': body
+  }
+
+def validate_qs_params(qs_param_dict: dict):
+    is_valid = True
+    try:
+        if len(qs_param_dict.keys()) != 1:
+            is_valid=False
+        if not (isinstance(qs_param_dict[QS_USER_ID], str) and (len(qs_param_dict[QS_USER_ID]) < 50)):
+            is_valid=False
+
+    except Exception as e:
+        logger.exception(repr(e))
+
+    return is_valid
+
+def find_confirmed_friendships(user_id: str):
+
+    response = friendship_table.scan(
+        FilterExpression=((Attr(FRIENDSHIP_COL_SENT_ID).eq(user_id) | 
+                          Attr(FRIENDSHIP_COL_RECEIVED_ID).eq(user_id)) &
+                          Attr(FRIENDSHIP_COL_CONFIRMED).eq(True))
+    )
+    
+    return response["Items"]
+
+def find_unconfirmed_sent_friendships(user_id: str):
+
+    response = friendship_table.scan(
+        FilterExpression=(Attr(FRIENDSHIP_COL_SENT_ID).eq(user_id) &
+                          Attr(FRIENDSHIP_COL_CONFIRMED).eq(False))
+    )
+    
+    return response["Items"]
+
+def get_user_ids_to_display(confirmed_friendships: list, unconfirmed_sent_friendships: list):
+    user_ids_to_display = []
+    user_ids_to_display.extend(list(map(lambda f: f[FRIENDSHIP_COL_SENT_ID], confirmed_friendships)))
+    user_ids_to_display.extend(list(map(lambda f: f[FRIENDSHIP_COL_RECEIVED_ID], confirmed_friendships)))
+    user_ids_to_display.extend(list(map(lambda f: f[FRIENDSHIP_COL_RECEIVED_ID], unconfirmed_sent_friendships)))
+
+    #Deduplicate list
+    user_ids_to_display = list(dict.fromkeys(user_ids_to_display))
+
+    return user_ids_to_display
+
+
+def find_users_to_display(users_ids_to_display: list):
+
+    response = user_table.scan(
+        FilterExpression=(Attr(USER_COL_ID).is_in(users_ids_to_display))
+    )
+
+    return response["Items"]
+
+def transform_friend_user_data(users_to_display, sent_unconfirmed_friendships):
+    transformed_data = []
+    
+    # Build map of pending friends' userId to friendshipId
+    userid_friendshipid_map = {}
+    for sent_unconfirmed_friendship in sent_unconfirmed_friendships:
+        userid_friendshipid_map.update({sent_unconfirmed_friendship[FRIENDSHIP_COL_RECEIVED_ID]: sent_unconfirmed_friendship[FRIENDSHIP_COL_ID]})
+    
+    for user_data in users_to_display:
+        profile_picture_url = get_profile_picture_url(user_data[USER_COL_ID])
+        friendship_id = userid_friendshipid_map[user_data[USER_COL_ID]]
+
+        transformed_data.append(
+            FriendUserDisplayData(user_data[USER_COL_ID],
+                                  user_data[USER_COL_FIRSTNAME],
+                                  user_data[USER_COL_LASTNAME],
+                                  user_data[USER_COL_USERNAME],
+                                  profile_picture_url,
+                                  friendship_id,
+            )
+        )
+
+    return transformed_data
+
+def get_profile_picture_url(user_id):
+    presigned_url = "noProfilePicture"
+    try:
+        key = f"public/userProfilePictures/{user_id}/profilePicure.jpeg"
+        presigned_url = s3.generate_presigned_url('get_object', 
+                                                    Params = 
+                                                        {'Bucket': S3_BUCKET_NAME,  
+                                                        'Key': key}, 
+                                                    ExpiresIn = 3600
+                                                    )
+    except Exception as e:
+        logger.exception(e)
+        logger.info(f"No profile picture found for user {user_id}")
+
+    return presigned_url
+
+
+class FriendUserDisplayData():
+    def __init__(self, id: str, firstName: str, lastName: str, username: str, profilePictureUrl: str, friendshipId: str):
+        self.id = id
+        self.firstName = firstName
+        self.lastName = lastName
+        self.username = username
+        self.profilePictureUrl = profilePictureUrl
+        self.friendshipId = friendshipId
+    
+    def toJSON(self):
+        return {
+            USER_COL_ID: self.id,
+            USER_COL_FIRSTNAME: self.firstName,
+            USER_COL_LASTNAME: self.lastName,
+            USER_COL_USERNAME: self.username,
+            "profilePictureUrl": self.profilePictureUrl,
+            "friendshipId": self.friendshipId
+        }
+    

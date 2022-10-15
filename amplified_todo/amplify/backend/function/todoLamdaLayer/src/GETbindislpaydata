@@ -1,0 +1,142 @@
+from datetime import datetime
+import json
+import os
+import logging
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
+
+BIN_TABLE = os.environ.get("API_DEMIAPP_BINTABLE_NAME")
+REQUEST_HTTP_METHOD_FIELD = "httpMethod"
+REQUEST_QS_PARAMS_FIELD = "queryStringParameters"
+
+QS_PARAMS ={
+    "userId": "userId",
+    "top": "top"
+}
+
+BIN_TABLE_COLUMNS = {
+    "id": "id",
+    "userID": "userID",
+    "statusHistory": "statusHistory"
+}
+
+STATUS_HISTORY_ENUM = {
+    "claimed": "claimed",
+    "awaiting_pickup": "awaiting_pickup",
+    "picked_up": "picked_up",
+    "weighed": "weighed",
+    "composted": "composted"
+}
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+dynamodb = boto3.resource('dynamodb')
+bin_table = dynamodb.Table(BIN_TABLE)
+
+def handler(event, context):
+    logger.info(f'## ENVIRONMENT VARIABLES:\n{os.environ}')
+    logger.info(f'## EVENT:\n{event}')
+
+    http_verb = event[REQUEST_HTTP_METHOD_FIELD]
+
+    if http_verb == "GET": 
+        try:
+            qs_param_dict = event[REQUEST_QS_PARAMS_FIELD]
+            if validate_qs_params(qs_param_dict):
+                user_id = qs_param_dict[QS_PARAMS["userId"]]
+                num_bins_to_show = qs_param_dict[QS_PARAMS["top"]]
+                
+                db_response = find_bins_to_show(user_id, num_bins_to_show)
+
+                bins_display_data = transform_bin_display_data(db_response)
+
+                return make_return_obj(200, json.dumps([u.toJSON() for u in bins_display_data], default=str))
+            
+            else:
+                logger.error(f"Bad QS params")
+                return make_return_obj(400, "Error retrieving recent bin data")
+
+        except Exception as e:
+            logger.exception(repr(e))
+            return make_return_obj(500, "Error retrieving recent bin data")
+
+    else:
+        logger.error(f"Invalid HTTP request")
+        return make_return_obj(400, "Error retrieving recent bin data")
+
+
+def make_return_obj(statusCode, body):
+  return {
+    'statusCode': statusCode,
+    'headers': {
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+    },
+    'body': body
+  }
+
+def validate_qs_params(qs_param_dict: dict):
+    is_valid = True
+    try:
+        if len(qs_param_dict.keys()) != 2:
+            is_valid=False
+        if not (isinstance(qs_param_dict[QS_PARAMS["userId"]], str) 
+                and (len(qs_param_dict[QS_PARAMS["userId"]]) < 50)
+                and qs_param_dict[QS_PARAMS["userId"]]):
+            is_valid=False
+        if not (isinstance(qs_param_dict[QS_PARAMS["top"]], str) #TODO: isnumber() check
+                and (len(qs_param_dict[QS_PARAMS["top"]]) < 10)
+                and qs_param_dict[QS_PARAMS["top"]]):
+            is_valid=False
+
+    except Exception as e:
+        logger.exception(repr(e))
+
+    return is_valid
+
+def find_bins_to_show(user_id: str, num_bins_to_show: int):
+
+    response = bin_table.scan(
+        FilterExpression=(Attr(BIN_TABLE_COLUMNS["userID"]).eq(user_id))
+    )
+
+    # TODO: get only top n bins
+    
+    return response["Items"]
+
+
+def transform_bin_display_data(bins_response_data: list):
+    transformed_data = []
+        
+    for bin_data in bins_response_data:
+        claimed = bin_data[BIN_TABLE_COLUMNS["statusHistory"][STATUS_HISTORY_ENUM["claimed"]]]
+        pickedUp = bin_data[BIN_TABLE_COLUMNS["statusHistory"][STATUS_HISTORY_ENUM["picked_up"]]]
+        weighed = bin_data[BIN_TABLE_COLUMNS["statusHistory"][STATUS_HISTORY_ENUM["weighed"]]]
+
+        transformed_data.append(
+            BinDisplayData(bin_data[BIN_TABLE_COLUMNS["id"]],
+                           datetime.utcfromtimestamp(claimed).strftime('%Y-%m-%d %H:%M:%S'),
+                           datetime.utcfromtimestamp(pickedUp).strftime('%Y-%m-%d %H:%M:%S'),
+                           datetime.utcfromtimestamp(weighed).strftime('%Y-%m-%d %H:%M:%S')
+            )
+        )
+
+    return transformed_data
+
+class BinDisplayData():
+    def __init__(self, id: str, claimed: str, pickedUp: str, weighed: str):
+        self.id = id
+        self.claimed = claimed
+        self.pickedUp = pickedUp
+        self.weighed = weighed
+    
+    def toJSON(self):
+        return {
+            BIN_TABLE_COLUMNS["id"]: self.id,
+            "claimed": self.claimed,
+            "pickedUp": self.pickedUp,
+            "weighed": self.weighed,
+        }
+    
+    

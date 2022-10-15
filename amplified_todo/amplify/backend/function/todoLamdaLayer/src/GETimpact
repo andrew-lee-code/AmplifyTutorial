@@ -1,0 +1,255 @@
+from argparse import ArgumentDefaultsHelpFormatter
+from datetime import datetime
+import json
+import os
+import logging
+import math
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
+
+BIN_TABLE = os.environ.get("API_DEMIAPP_BINTABLE_NAME")
+USER_TABLE = os.environ.get("API_DEMIAPP_USERTABLE_NAME")
+FRIENDSHIP_TABLE = os.environ.get("API_DEMIAPP_FRIENDSHIPTABLE_NAME")
+BUILDING_TABLE = os.environ.get("API_DEMIAPP_BUILDINGTABLE_NAME")
+USER_BUILDING_UNIT_TABLE = os.environ.get("API_DEMIAPP_USERBUILDINGUNITTABLE_NAME")
+REQUEST_HTTP_METHOD_FIELD = "httpMethod"
+REQUEST_QS_PARAMS_FIELD = "queryStringParameters"
+
+QS_PARAMS ={
+    "userId": "userId",
+    "scope": "scope"
+}
+
+SCOPE_ENUM = {
+    "individual": "individual",
+    "friends": "friends",
+    "building": "building"
+}
+
+BIN_TABLE_COLUMNS = {
+    "id": "id",
+    "userID": "userID",
+    "weightLb": "weightLb",
+    "status": "status"
+}
+
+BIN_STATUS_ENUM = {
+    "UNCLAIMED": "UNCLAIMED",
+    "CLAIMED": "CLAIMED",
+    "AWAITING_PICKUP": "AWAITING_PICKUP",
+    "PICKED_UP": "PICKED_UP",
+    "WEIGHED" : "WEIGHED",
+    "COMPOSTED" : "COMPOSTED"
+}
+
+USER_TABLE_COLUMNS = {
+    "id": "id"
+}
+
+FRIENDSHIP_TABLE_COLUMNS = {
+    "senderUserId": "senderUserId",
+    "receiverUserId": "receiverUserId",
+    "confirmed": "confirmed"
+}
+
+BUILDING_TABLE_COLUMNS = {
+    "id": "id"
+}
+
+USER_BUILDING_UNIT_TABLE_COLUMNS = {
+    "userID": "userID",
+    "buildingUnitID": "buildingUnitID",
+    "buildingID": "buildingID"
+}
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+dynamodb = boto3.resource('dynamodb')
+user_table = dynamodb.Table(USER_TABLE)
+bin_table = dynamodb.Table(BIN_TABLE)
+friendship_table = dynamodb.Table(FRIENDSHIP_TABLE)
+building_table = dynamodb.Table(BUILDING_TABLE)
+user_building_unit_table = dynamodb.Table(USER_BUILDING_UNIT_TABLE)
+
+
+def handler(event, context):
+    logger.info(f'## ENVIRONMENT VARIABLES:\n{os.environ}')
+    logger.info(f'## EVENT:\n{event}')
+
+    http_verb = event[REQUEST_HTTP_METHOD_FIELD]
+
+    if http_verb == "GET": 
+        try:
+            qs_param_dict = event[REQUEST_QS_PARAMS_FIELD]
+            if validate_qs_params(qs_param_dict):
+                user_id = qs_param_dict[QS_PARAMS["userId"]]
+                scope = qs_param_dict[QS_PARAMS["scope"]]
+                bins_in_scope = []
+
+                if scope == SCOPE_ENUM["individual"]:
+                    bins_in_scope = get_individual_scope_bins(user_id)
+                if scope == SCOPE_ENUM["building"]:
+                    bins_in_scope = get_building_scope_bins(user_id)
+                if scope == SCOPE_ENUM["friends"]:
+                    bins_in_scope = get_friends_scope_bins(user_id)
+                
+                impact_metrics = calculate_impact_metrics(bins_in_scope)
+
+                return make_return_obj(200, json.dumps(impact_metrics.toJSON(), default=str))
+            
+            else:
+                logger.error(f"Bad QS params")
+                return make_return_obj(400, "Error calculating impact data")
+
+        except Exception as e:
+            logger.exception(repr(e))
+            return make_return_obj(500, "Error calculating impact data")
+
+    else:
+        logger.error(f"Invalid HTTP request")
+        return make_return_obj(400, "Error calculating impact data")
+
+
+def make_return_obj(statusCode, body):
+  return {
+    'statusCode': statusCode,
+    'headers': {
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+    },
+    'body': body
+  }
+
+def validate_qs_params(qs_param_dict: dict):
+    is_valid = True
+    try:
+        if len(qs_param_dict.keys()) != 2:
+            is_valid=False
+        if not (isinstance(qs_param_dict[QS_PARAMS["userId"]], str) 
+                and (len(qs_param_dict[QS_PARAMS["userId"]]) < 50)
+                and qs_param_dict[QS_PARAMS["userId"]]):
+            is_valid=False
+        if not (isinstance(qs_param_dict[QS_PARAMS["scope"]], str)
+                and (qs_param_dict[QS_PARAMS["scope"]] in SCOPE_ENUM.keys())):
+            is_valid=False
+
+    except Exception as e:
+        logger.exception(repr(e))
+
+    return is_valid
+
+def get_individual_scope_bins(user_id: str):
+
+    response = friendship_table.scan(
+        FilterExpression=(Attr(BIN_TABLE_COLUMNS["userID"]).eq(user_id))
+    )
+    
+    # Filter for bins with non-zero weights and that have been marked weighed or composted
+    return_data = list(filter(lambda b: b[BIN_TABLE_COLUMNS["weightLb"]] != None and 
+                          b[BIN_TABLE_COLUMNS["weightLb"]] > 0 and
+                          b[BIN_TABLE_COLUMNS["status"]] in [BIN_STATUS_ENUM["WEIGHED"], BIN_STATUS_ENUM["COMPOSTED"]],
+                          response["Items"]))
+   
+    return return_data
+
+def get_building_scope_bins(user_id: str):
+    user_building_unit_linkage = user_building_unit_table.scan(
+        FilterExpression=(Attr(USER_BUILDING_UNIT_TABLE_COLUMNS["userID"]).eq(user_id))
+    )
+    building_id = user_building_unit_linkage["Items"][0][USER_BUILDING_UNIT_TABLE_COLUMNS["buildingID"]]
+
+    all_building_units = user_building_unit_table.scan(
+        FilterExpression=(Attr(USER_BUILDING_UNIT_TABLE_COLUMNS["buildingID"]).eq(building_id))
+    )
+    neighbor_user_ids = list(map(lambda b: b[USER_BUILDING_UNIT_TABLE_COLUMNS["userID"]],all_building_units["Items"]))
+
+    return_data = []
+    #TODO: this many database calls could get costly with hundreds of neighbors, maybe think of a better way to do this
+    for neighbor_user_id in neighbor_user_ids:
+        return_data.extend(get_individual_scope_bins(neighbor_user_id))
+    
+    return return_data
+
+def get_friends_scope_bins(user_id: str):
+    confirmed_friendships = friendship_table.scan(
+        FilterExpression=((Attr(FRIENDSHIP_TABLE_COLUMNS["senderUserId"]).eq(user_id) |
+                          Attr(FRIENDSHIP_TABLE_COLUMNS["receiverUserId"]).eq(user_id)) &
+                          Attr(FRIENDSHIP_TABLE_COLUMNS["confirmed"]).eq(True))
+    )
+
+    friend_user_ids = list(map(lambda f: f[FRIENDSHIP_TABLE_COLUMNS["receiverUserId"]], confirmed_friendships)).extend(
+        list(map(lambda f: f[FRIENDSHIP_TABLE_COLUMNS["senderUserId"]], confirmed_friendships))
+    )
+
+    friend_user_ids = list(dict.fromkeys(friend_user_ids))
+
+    return_data = []
+    #TODO: this many database calls could get costly with hundreds of friends, maybe think of a better way to do this
+    for friend_user_id in friend_user_ids:
+        return_data.extend(get_individual_scope_bins(friend_user_id))
+    
+    return return_data
+
+def calculate_impact_metrics(bins_in_scope: list):
+    total_compost_weight = bins_in_scope
+
+    return AggregateImpactData(
+        totalCompostWeight=total_compost_weight,
+        carbonPoundsRemoved=calculate_carbon_pounds_removed(total_compost_weight),
+        gasCarUsageOffset=calculate_gas_car_usage_offset(total_compost_weight),
+        fertilizerCreated=calculate_fertilizer_created(total_compost_weight),
+        treesPlanted=calculate_trees_planted(total_compost_weight)
+    )
+
+def calculate_total_compost_weight(bins_in_scope: list):
+    total_weight = 0
+    for bin in bins_in_scope:
+        total_weight = total_weight + bin[BIN_TABLE_COLUMNS["weightLb"]]
+    
+    # TODO: round this to a single decimal point
+    return total_weight
+
+def calculate_carbon_pounds_removed(total_compost_weight: float):
+    # TODO: this is a random placeholder calculation - replace with real formula
+
+    # TODO: round this to a single decimal point
+    return total_compost_weight / 7.1
+
+def calculate_gas_car_usage_offset(total_compost_weight: float):
+    # TODO: this is a random placeholder calculation - replace with real formula
+
+    # TODO: round this to a single decimal point
+    return total_compost_weight * 2.2
+
+def calculate_fertilizer_created(total_compost_weight: float):
+    # TODO: this is a random placeholder calculation - replace with real formula
+
+    # TODO: round this to a single decimal point
+    return total_compost_weight * 0.123
+
+def calculate_trees_planted(total_compost_weight: float):
+    # TODO: this is a random placeholder calculation - replace with real formula
+
+    # TODO: round this to a single decimal point
+    return total_compost_weight / 7
+
+class AggregateImpactData():
+    def __init__(self, totalCompostWeight: float, carbonPoundsRemoved: float, gasCarUsageOffset: float, fertilizerCreated: float, treesPlanted: float):
+        self.id = id
+        self.totalCompostWeight = totalCompostWeight
+        self.carbonPoundsRemoved = carbonPoundsRemoved
+        self.gasCarUsageOffset = gasCarUsageOffset
+        self.fertilizerCreated = fertilizerCreated
+        self.treesPlanted = treesPlanted
+    
+    def toJSON(self):
+        return {
+            "totalCompostWeight": self.totalCompostWeight,
+            "carbonPoundsRemoved": self.carbonPoundsRemoved,
+            "gasCarUsageOffset": self.gasCarUsageOffset,
+            "fertilizerCreated": self.fertilizerCreated,
+            "treesPlanted": self.treesPlanted
+        }
+    
+    
