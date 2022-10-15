@@ -1,5 +1,0 @@
-{
-  "httpMethod": "POST",
-  "path": "/todo",
-  "body": "{\"test\": \"this is a test mock\"}"
-}
